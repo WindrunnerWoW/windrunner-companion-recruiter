@@ -1,0 +1,67 @@
+[ModuleConf]
+
+# Master switch.
+CompanionRecruiter.Enabled = 1
+
+# Players below this level cannot recruit companions.
+CompanionRecruiter.MinimumLevel = 10
+
+# Multiplier for temporary contracts. The base price rises each level from
+# 1 silver at level 10 to 30 silver at level 40 and 1 gold at level 60.
+# Set to 0 for free temporary contracts.
+CompanionRecruiter.CostMultiplier = 1.0
+
+# Flat one-time gold price for a companion saved permanently to one character.
+# This does not depend on the owner's level or the temporary cost multiplier.
+CompanionRecruiter.PermanentCostGold = 75
+
+# Maximum number of companions a character may buy permanently. Lowering this
+# does not prevent inviting, dismissing, or removing companions already owned.
+CompanionRecruiter.MaxOwnedCompanions = 40
+
+# Normal temporary contract duration (3 hours).
+CompanionRecruiter.LifetimeMinutes = 180
+
+# Refund and remove a companion that cannot log in within this many seconds,
+# or cannot join within this many seconds after preparation. Clamped to 30-600.
+CompanionRecruiter.LoginTimeoutSeconds = 120
+
+# Spell, skill, gear, and supply preparation shares one world-thread budget
+# across temporary recruitment and permanent summons. Active companions do not
+# level up or regenerate their setup. Clamped to 1-5 per one-second update.
+CompanionRecruiter.PreparationsPerUpdate = 2
+
+# Equipment targets bot level + 5 below level 55. At level 55 and above, target
+# the owner's average equipped item level, with a minimum target of 55. Empty
+# slots, shirts, and tabards are excluded from the average. Target and ranges
+# are captured at purchase (temporary) or summon (permanent).
+# Prefer items within +/- this range; clamped to 0-100 item levels.
+CompanionRecruiter.GearItemLevelRange = 5
+
+# If a slot has no suitable item in the preferred range, widen to +/- this
+# range (clamped to the preferred range through 100). If that also fails, use
+# the closest suitable lower-level item; never exceed this range's upper cap
+# or AiPlayerbot.RandomGearMaxLevel. The target is not a minimum for each item.
+CompanionRecruiter.GearItemLevelFallbackRange = 15
+
+# Apply generated gear enchants only to equipped items above this item level.
+# The comparison is strict: the default enchants item level 66 and higher.
+# Set to 0 to retain PlayerBots' normal level-based enchanting behavior.
+CompanionRecruiter.EnchantItemLevelThreshold = 65
+
+# Once a contract expires, dead players and players in instances retain their
+# companions. Grace starts once at expiry, counts down outside protection,
+# and pauses while protected. Returning to protection never resets it.
+CompanionRecruiter.ProtectInInstances = 1
+CompanionRecruiter.ExpiryGraceMinutes = 10
+
+# One player plus this maximum must fit within the 40-player raid cap.
+CompanionRecruiter.MaxCompanionsPerPlayer = 39
+
+# Teleport a grouped companion to its owner when it is on another map or
+# instance, farther than TeleportDistance yards (clamped 30-500), has no
+# walkable path to the owner, or has been following from more than 30 yards
+# away without getting closer for StuckSeconds (clamped 2-60). The no-path and
+# stuck checks wait until neither the owner nor the companion is in combat.
+CompanionRecruiter.TeleportDistance = 100
+CompanionRecruiter.StuckSeconds = 8
