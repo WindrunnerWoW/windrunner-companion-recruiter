@@ -16,6 +16,7 @@ PREFIX = r'''
 #include <stdexcept>
 #include <string>
 using uint32 = uint32_t;
+using uint8 = uint8_t;
 struct ObjectGuid {
     uint32 value = 0;
     ObjectGuid(uint32 v = 0) : value(v) {}
@@ -48,14 +49,16 @@ struct Group {
 struct Player {
     uint32 id; bool bot = false;
     Group* group = nullptr; Group* original = nullptr;
-    bool world = true, teleport = false;
+    bool world = true, teleport = false, bg = false;
     enum class HardcoreInteractionResult { Allowed };
     ObjectGuid GetObjectGuid() const { return id; }
+    uint32 GetGUIDLow() const { return id; }
     Group* GetGroup() const { return group; }
     Group* GetOriginalGroup() const { return original; }
     Group* GetGroupInvite() const { return nullptr; }
     bool IsInWorld() const { return world; }
     bool IsBeingTeleported() const { return teleport; }
+    bool InBattleGround() const { return bg; }
     char const* GetName() const { return "fixture"; }
     bool IsInGroup(Player* other, bool) const { return group && group == other->group; }
     HardcoreInteractionResult HandleHardcoreInteraction(Player*, bool) const {
@@ -76,7 +79,14 @@ bool Group::AddMember(ObjectGuid guid, char const*) {
     return true;
 }
 bool GetBotAI(Player* player) { return player && player->bot; }
-std::map<uint32, int> gContracts, gOwnedCompanions;
+struct CompanionContract { uint32 ownerGuid = 0; bool suspended = false; };
+struct OwnedCompanion { uint32 ownerGuid = 0; bool invited = true; };
+std::map<uint32, CompanionContract> gContracts;
+std::map<uint32, OwnedCompanion> gOwnedCompanions;
+Player* FindCompanionOwner(uint32 ownerGuid) { return sObjectMgr.GetPlayer(ObjectGuid(ownerGuid)); }
+namespace ObjectAccessor { Player* FindConnectedPlayer(ObjectGuid guid) { return sObjectMgr.GetPlayer(guid); } }
+uint32 dismissed = 0;
+void RequestDismiss(uint32) { ++dismissed; }
 constexpr uint32 MAX_GROUP_SIZE = 5, MAX_RAID_SIZE = 40;
 uint32 warnings = 0;
 void NotifyOwnerCannotLeadGroup(Player*, Group*, Player*) { ++warnings; }
@@ -89,25 +99,40 @@ int main() {
     try {
         Player owner{1}, bot{2, true}, human{3};
         sObjectMgr.players = {{1, &owner}, {2, &bot}, {3, &human}};
-        gContracts[2] = 1;
+        gContracts[2] = CompanionContract{1};
         Group group;
         group.members = {1, 2, 3}; group.leader = 2;
         owner.group = bot.group = human.group = &group;
         check(EnsureCompanionInGroup(&owner, &bot), "Existing member rejected");
-        check(group.leader == 2 && group.changes == 0, "Maintenance changed the chosen leader");
+        check(group.leader == 1 && group.changes == 1, "Companion leader was not replaced by its master");
         EnsureCompanionInGroup(&owner, &bot);
-        check(group.changes == 0, "Maintenance changed leadership repeatedly");
+        check(group.changes == 1, "Maintenance changed leadership repeatedly");
+
+        // Master (contract owner) and leader are distinct. The AI follows the
+        // group leader while grouped; the master is the fallback and the only
+        // command source.
+        group.leader = 2;
+        check(GetFollowTarget(&owner, &bot) == &bot, "Grouped companion ignored the in-world group leader");
+        group.leader = 3;
+        check(GetFollowTarget(&owner, &bot) == &human, "Grouped companion did not follow the group leader");
+        check(GetFollowTarget(&owner, &bot) != &owner, "Grouped companion followed its master over the leader");
+        bot.bg = true;
+        check(GetFollowTarget(&owner, &bot) == &owner, "Battleground companion ignored its master");
+        bot.bg = false;
+        owner.group = nullptr;
+        check(GetFollowTarget(&owner, &bot) == &owner, "Ungrouped companion did not follow its master");
+        owner.group = &group;
 
         group.leader = 2; group.raid = true; group.assistants.insert(1);
         EnsureCompanionInGroup(&owner, &bot);
-        check(group.leader == 2, "Raid assistant stole leadership");
+        check(group.leader == 1, "Companion leader kept leadership in a raid");
 
         sObjectMgr.players.erase(2); group.leader = 2;
         EnsureCompanionInGroup(&owner, &bot);
-        check(group.leader == 2, "Offline temporary leader was replaced");
-        gContracts.clear(); gOwnedCompanions[2] = 1; group.leader = 2;
+        check(group.leader == 1, "Offline temporary companion leader was not replaced");
+        gContracts.clear(); gOwnedCompanions[2] = OwnedCompanion{1}; group.leader = 2;
         EnsureCompanionInGroup(&owner, &bot);
-        check(group.leader == 2, "Offline permanent leader was replaced");
+        check(group.leader == 1, "Offline permanent companion leader was not replaced");
         sObjectMgr.players[2] = &bot;
 
         group.leader = 3;
@@ -120,10 +145,21 @@ int main() {
         check(!EnsureCompanionInGroup(&owner, &bot) && warnings == 1,
               "Nonleader recruited into another human's group");
 
+        // The companion leaves a stale group even when the master's current
+        // group cannot take it (the master is neither leader nor assistant).
+        Group staleGroup;
+        staleGroup.members = {2}; staleGroup.leader = 2;
+        bot.group = &staleGroup;
+        uint32 const warningsBefore = warnings;
+        check(!EnsureCompanionInGroup(&owner, &bot) && bot.group == nullptr &&
+              warnings == warningsBefore + 1,
+              "Stale group kept when the master could not add the companion");
+        warnings = warningsBefore;
+
         group.members.insert(2); bot.group = &group; group.leader = 1;
         group.ChangeLeader(2);
         EnsureCompanionInGroup(&owner, &bot);
-        check(group.leader == 2, "Explicit leader selection was overwritten");
+        check(group.leader == 1, "Companion could keep leadership over its master");
         group.ChangeLeader(3);
         check(group.leader == 3, "Human transfer failed");
 
@@ -141,7 +177,36 @@ int main() {
         bot.teleport = false;
         check(!EnsureCompanionInGroup(nullptr, &bot), "Missing owner accepted");
         check(!EnsureCompanionInGroup(&owner, nullptr), "Missing bot accepted");
-        std::cout << "PASS: existing groups, raids, offline leaders, human authority, explicit leadership\n";
+
+        // Group membership changes must not end a contract. Only a deliberate
+        // removal while the owner stays in that group does.
+        Group oldGroup;
+        oldGroup.members = {1, 2}; oldGroup.leader = 1;
+        bot.group = &oldGroup;
+        gContracts.clear(); gOwnedCompanions.clear();
+        gContracts[2] = CompanionContract{1};
+        GroupScriptProbe probe;
+        dismissed = 0;
+        owner.group = nullptr;
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(1), 0);
+        check(dismissed == 0 && gContracts.count(2), "Owner leaving a group dismissed a temporary companion");
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
+        check(dismissed == 0 && gContracts.count(2), "Companion leaving with its master ended its contract");
+
+        owner.group = &oldGroup;
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
+        check(dismissed == 1, "Kicked companion kept its contract");
+
+        dismissed = 0; gContracts.clear();
+        gOwnedCompanions[2] = OwnedCompanion{1};
+        owner.group = nullptr;
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
+        check(gOwnedCompanions[2].invited, "Owner leaving cleared a permanent companion invitation");
+        owner.group = &oldGroup;
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
+        check(!gOwnedCompanions[2].invited, "Kicked permanent companion kept its invitation");
+
+        std::cout << "PASS: existing groups, raids, offline leaders, human authority, explicit leadership, master/leader split, leave-with-master\n";
     } catch (std::exception const& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
     }
@@ -153,8 +218,10 @@ def run():
     module = Path(__file__).resolve().parents[1]
     cpp = (module / "src/CompanionRecruiter.cpp").read_text(encoding="utf-8")
     source = PREFIX
-    for signature in ("bool EnsureCompanionInGroup(",):
-        source += extract(cpp, signature).replace(" override", "")
+    for signature in ("void EnsureOwnerLeadsGroup(", "bool EnsureCompanionInGroup(", "Player* GetFollowTarget("):
+        source += extract(cpp, signature).replace(" override", "") + "\n"
+    source += "struct GroupScriptProbe {\n" + extract(
+        cpp, "void OnRemoveMember(Group* group, ObjectGuid guid").replace(" override", "") + "};\n"
     source += CHECKS
     with tempfile.TemporaryDirectory(prefix="companion-group-test-") as directory:
         work = Path(directory)

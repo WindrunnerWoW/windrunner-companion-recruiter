@@ -121,11 +121,13 @@ struct PlayerbotAI {
     Player* master = nullptr;
     bool follow = false, staleMovement = true;
     uint32 strategyResets = 0, movementResets = 0, role = 0;
+    bool masterSetBeforeReset = false;
+    void RememberReset() { masterSetBeforeReset = master != nullptr; }
     Player* GetMaster() const { return master; }
     void SetMaster(Player* owner) { master = owner; }
     void SetForcedRole(uint8 value) { role = value; }
     void DoSpecificAction(char const*) {}
-    void ResetStrategies() { ++strategyResets; follow = false; }
+    void ResetStrategies() { ++strategyResets; RememberReset(); follow = false; }
     void ChangeStrategy(char const*, BotState) { follow = true; }
     void Reset(bool full) { if (full) { ++movementResets; staleMovement = false; } }
 };
@@ -161,6 +163,8 @@ uint32 messages = 0, persists = 0, deletes = 0;
 void SendMessage(Player*, std::string const&) { ++messages; }
 void DeleteCompanion(uint32 id) { ++deletes; sRandomPlayerbotMgr.bots.erase(id); }
 Player* GetCommandMaster(Player* owner) { return owner; }
+Player* GetFollowTarget(Player* owner, Player*) { return owner; }
+void EnsureOwnerLeadsGroup(Player*, Group*) {}
 void BringCompanionToOwner(Player*, Player*) {} // Travel/bindings have their own production harness.
 bool IsProtected(Player* owner) { return !owner->alive || owner->mapId == 33; }
 void check(bool ok, char const* message) { if (!ok) throw std::runtime_error(message); }
@@ -273,6 +277,18 @@ int main(int argc, char** argv) {
             gContracts.at(2).prepared = false; gContracts.at(2).specTab = 0; tempAi.follow = false;
             UpdateContracts(budget);
             check(tempAi.follow && !temporary.xp, "Preassigned temporary master prevented follow after preparation");
+
+            // First hire: the logged-in AI has no master yet. Assign it before
+            // the strategy rebuild, or AiFactory builds a free bot (gather,
+            // emote, configured grind/wander/rpg) that StripCompanionRoaming
+            // skips because HasRealPlayerMaster() is still false. Leftover
+            // roaming strategies suppress follow until the owner dies.
+            gContracts.at(2).prepared = false; gContracts.at(2).specTab = 0;
+            tempAi.follow = false; tempAi.master = nullptr; tempAi.masterSetBeforeReset = false;
+            UpdateContracts(budget);
+            check(tempAi.follow && tempAi.master == &owner && tempAi.masterSetBeforeReset,
+                  "First hire rebuilt the AI before assigning the temporary companion master");
+
             uint32 const preparations = gearPreparations;
             ownedAi.follow = tempAi.follow = false; // Explicit owner stay command.
             UpdateContracts(budget); UpdateOwnedCompanions(budget);

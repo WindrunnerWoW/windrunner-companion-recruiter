@@ -699,23 +699,6 @@ void RequestDismissOwner(uint32 ownerGuid)
         }
 }
 
-void RequestDismissOwnerFromGroup(uint32 ownerGuid)
-{
-    if (!ownerGuid)
-        return;
-
-    for (auto& pair : gContracts)
-    {
-        CompanionContract& contract = pair.second;
-        if (contract.ownerGuid != ownerGuid || contract.suspended)
-            continue;
-        contract.expiresAt = Clock::time_point::min();
-        contract.expiresAtUnix = 0;
-        contract.graceExpiresAtUnix = 0;
-        PersistTemporaryContract(contract);
-    }
-}
-
 Player* FindCompanionOwner(uint32 ownerGuid)
 {
     // In this core FindConnectedPlayer aliases FindPlayer, which excludes
@@ -1811,9 +1794,32 @@ bool IsProtected(Player* owner)
 
 Player* GetCommandMaster(Player* owner)
 {
-    // Keep commands, private replies, and following bound to the player who
-    // recruited the companion, even when a raid assistant recruits for a raid.
+    // Keep commands, private replies, and contract ownership bound to the
+    // player who recruited the companion, even when a raid assistant recruits
+    // for a raid. Following is a different thing: the AI follows
+    // "master target", and PlayerBots resolves that to the group leader while
+    // grouped. See GetFollowTarget for the travel/snap equivalent.
     return owner;
+}
+
+// PlayerbotAI::GetGroupMaster() returns the group leader for a grouped bot and
+// the master otherwise. The recruiter's travel checks must use the same target
+// or they fight the follow movement: a companion that is happily following the
+// raid leader would be yanked to a recruiting assistant standing elsewhere.
+Player* GetFollowTarget(Player* owner, Player* bot)
+{
+    if (!owner)
+        return nullptr;
+
+    if (bot && bot->InBattleGround())
+        return owner;
+
+    Group* group = owner->GetGroup();
+    if (!group || group->GetLeaderGuid() == owner->GetObjectGuid())
+        return owner;
+
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    return leader && leader->IsInWorld() ? leader : owner;
 }
 
 bool IsSafeTeleportTarget(Player const* player)
@@ -1854,15 +1860,58 @@ void NotifyOwnerCannotLeadGroup(Player* owner, Group* group, Player* bot)
 }
 
 // Direct membership avoids repeatedly sending failed invite opcodes.
-// Companions do not change leadership chosen by the group's players.
+// Companions do not change leadership chosen by the group's players, but a
+// companion must never lead the group its owner is in either. PlayerBots hands
+// leadership to the master when an alt bot logs in; externally managed
+// companions skip that path, so a manual transfer or a leader disconnect can
+// leave a bot in charge. Only this owner's own companion is replaced - another
+// player's leader is not ours to change.
+void EnsureOwnerLeadsGroup(Player* owner, Group* group)
+{
+    if (!owner || !group)
+        return;
+
+    ObjectGuid const ownerGuid = owner->GetObjectGuid();
+    uint32 const ownerGuidLow = owner->GetGUIDLow();
+    if (!group->IsMember(ownerGuid))
+        return;
+
+    ObjectGuid const leaderGuid = group->GetLeaderGuid();
+    if (leaderGuid.IsEmpty())
+    {
+        sLog.outError("Companion recruiter: group %u had no leader; restoring %s as leader.",
+            group->GetId(), owner->GetName());
+        group->ChangeLeader(ownerGuid);
+        return;
+    }
+
+    uint32 const leaderGuidLow = leaderGuid.GetCounter();
+    auto contract = gContracts.find(leaderGuidLow);
+    auto owned = gOwnedCompanions.find(leaderGuidLow);
+    bool const ownedLeader =
+        (contract != gContracts.end() && contract->second.ownerGuid == ownerGuidLow) ||
+        (owned != gOwnedCompanions.end() && owned->second.ownerGuid == ownerGuidLow);
+    if (!ownedLeader)
+        return;
+
+    sLog.outError("Companion recruiter: group %u leader is %s's companion; restoring the master as leader.",
+        group->GetId(), owner->GetName());
+    group->ChangeLeader(ownerGuid);
+}
+
 bool EnsureCompanionInGroup(Player* owner, Player* bot)
 {
     if (!owner || !bot || owner == bot)
         return false;
 
     Group* group = owner->GetGroup();
+    Group* const ownerGroup = group;
     if (group && group->isBGGroup())
         group = owner->GetOriginalGroup();
+    if (group && (!ownerGroup || !ownerGroup->isBGGroup()) &&
+        owner->IsInWorld() && !owner->IsBeingTeleported())
+        EnsureOwnerLeadsGroup(owner, group);
+
     if (owner->IsInGroup(bot, true) || (group && bot->GetGroup() == group))
         return true;
     // Zoning (instance portals, summons, logins) briefly leaves either side
@@ -1873,6 +1922,15 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
     if (owner->HandleHardcoreInteraction(bot, true) != Player::HardcoreInteractionResult::Allowed)
         return false;
 
+    // Leave a stale group before asking whether the owner's current group can
+    // take the companion. Otherwise a master who left a group and joined one
+    // they do not lead would leave the companion behind in the old group.
+    if (Group* botGroup = bot->GetGroup())
+    {
+        if (botGroup != group)
+            bot->RemoveFromGroup();
+    }
+
     if (group)
     {
         // A full group cannot take the companion whoever leads it.
@@ -1881,14 +1939,6 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
             return false;
 
         ObjectGuid const ownerGuid = owner->GetObjectGuid();
-        // A group without a leader (left behind by a disband) cannot be led by
-        // anyone. If the owner is still a member, give them the lead back.
-        if (group->GetLeaderGuid().IsEmpty() && group->IsMember(ownerGuid))
-        {
-            sLog.outError("Companion recruiter: group %u had no leader; restoring %s as leader.",
-                group->GetId(), owner->GetName());
-            group->ChangeLeader(ownerGuid);
-        }
         if (!group->IsLeader(ownerGuid) && !(group->isRaidGroup() && group->IsAssistant(ownerGuid)))
         {
             NotifyOwnerCannotLeadGroup(owner, group, bot);
@@ -1899,11 +1949,6 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
             return false;
     }
 
-    if (Group* botGroup = bot->GetGroup())
-    {
-        if (botGroup != group)
-            bot->RemoveFromGroup();
-    }
     if (Group* pending = bot->GetGroupInvite())
         pending->RemoveInvite(bot);
 
@@ -2143,7 +2188,18 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
     bot->SetXPGain(false);
     ai->SetForcedRole(uint8(contract.role));
 
-    bool const needsFollow = !contract.prepared;
+    // Assign the master before the strategy rebuild below. AiFactory decides
+    // whether a bot is a companion from ai->GetMaster() when it builds the
+    // non-combat set: with no master it applies the free-bot strategies
+    // (gather, emote, and whatever AiPlayerbot.NonCombatStrategies lists -
+    // commonly grind/wander/rpg for an older conf) and StripCompanionRoaming
+    // never runs. Those leftover roaming strategies can suppress follow, so the
+    // companion stands at a node or craft spot instead of staying with its
+    // owner.
+    Player* commandMaster = GetCommandMaster(owner);
+    bool const needsFollow = !contract.prepared || ai->GetMaster() != commandMaster;
+    ai->SetMaster(commandMaster);
+
     if (!contract.prepared)
     {
         if (!PrepareOnlineCompanion(contract, bot, ai))
@@ -2151,11 +2207,10 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
         ai->ResetStrategies();
     }
 
-    Player* commandMaster = GetCommandMaster(owner);
     MaintainCompanionFollow(commandMaster, bot, ai, needsFollow);
 
     EnsureCompanionInGroup(owner, bot);
-    BringCompanionToOwner(commandMaster, bot);
+    BringCompanionToOwner(GetFollowTarget(owner, bot), bot);
 
     bool const wasJoined = contract.joinedOnce;
     contract.initialized = owner->IsInGroup(bot, true);
@@ -2204,11 +2259,11 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
     if (!companion.invited)
         return true;
 
-    Player* commandMaster = owner;
+    Player* commandMaster = GetCommandMaster(owner);
     MaintainCompanionFollow(commandMaster, bot, ai, needsFollow);
 
     EnsureCompanionInGroup(owner, bot);
-    BringCompanionToOwner(commandMaster, bot);
+    BringCompanionToOwner(GetFollowTarget(owner, bot), bot);
     return true;
 }
 
@@ -3329,39 +3384,36 @@ public:
             (group->isRaidGroup() && group->IsAssistant(owner->GetObjectGuid()));
     }
 
+    // Companions are owned by the player, not by the group. A membership
+    // change only ends the contract when the owner is still in that group and
+    // deliberately removed the bot. When the owner leaves or the group
+    // disbands, the companion simply detaches and the maintenance pass regroups
+    // it around its master (who creates a fresh group if needed).
     void OnRemoveMember(Group* group, ObjectGuid guid, uint8 /*method*/) override
     {
         uint32 const removedGuid = guid.GetCounter();
-        auto temporary = gContracts.find(removedGuid);
-        if (temporary == gContracts.end() || !temporary->second.suspended)
-            RequestDismiss(removedGuid);
-
-        auto owned = gOwnedCompanions.find(removedGuid);
-        if (owned != gOwnedCompanions.end())
-            owned->second.invited = false;
 
         Player* removedPlayer = ObjectAccessor::FindConnectedPlayer(guid);
         if (removedPlayer && !GetBotAI(removedPlayer))
-        {
-            RequestDismissOwnerFromGroup(removedGuid);
-            for (auto& pair : gOwnedCompanions)
-                if (pair.second.ownerGuid == removedGuid)
-                    pair.second.invited = false;
-        }
-    }
-
-    void OnDisband(Group* group) override
-    {
-        if (!group)
             return;
-        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
-            if (Player* player = ref->getSource(); player && !GetBotAI(player))
-            {
-                RequestDismissOwnerFromGroup(player->GetGUIDLow());
-                for (auto& pair : gOwnedCompanions)
-                    if (pair.second.ownerGuid == player->GetGUIDLow())
-                        pair.second.invited = false;
-            }
+
+        auto ownerStayed = [&](uint32 ownerGuid)
+        {
+            Player* owner = FindCompanionOwner(ownerGuid);
+            return owner && group && owner->GetGroup() == group;
+        };
+
+        auto temporary = gContracts.find(removedGuid);
+        if (temporary != gContracts.end())
+        {
+            if (!temporary->second.suspended && ownerStayed(temporary->second.ownerGuid))
+                RequestDismiss(removedGuid);
+            return;
+        }
+
+        auto owned = gOwnedCompanions.find(removedGuid);
+        if (owned != gOwnedCompanions.end() && ownerStayed(owned->second.ownerGuid))
+            owned->second.invited = false;
     }
 };
 } // namespace

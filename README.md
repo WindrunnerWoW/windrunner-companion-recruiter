@@ -16,7 +16,7 @@ Companions stay at the level they were hired or summoned. They do not gain XP or
 
 Paid temporary contracts live in the character database. Logging out or restarting the world server logs the companion out; it reconnects when you return if the original deadline (or an active expiry-grace period) has not passed. Expired contracts keep a short grace while you are dead or in an instance: the timer runs in the open world and pauses while protected, without resetting when you go back inside.
 
-Companions are cleaned up when you leave the group, dismiss them, delete the owning character, or the contract ends. They keep the group’s chosen leader when they join or reconnect. Dungeon portals keep invitations and the group through loading screens; after they land, leftover movement from the previous map is cleared.
+Companions are cleaned up when you dismiss them, delete the owning character, or the contract ends. They belong to their owner, not to the group: a companion follows the group leader while grouped (like any PlayerBot), keeps answering the recruiting player, and leaves with its owner when the owner leaves or the group disbands, rejoining the owner’s next group when that group allows companions. A companion never leads the group; if one is promoted, the recruiter gives leadership back to the owner. Removing a companion itself (a kick) still dismisses it. Dungeon portals keep invitations and the group through loading screens; after they land, leftover movement from the previous map is cleared.
 
 ## Requirements
 
