@@ -15,6 +15,7 @@ PREFIX = r'''
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 using uint32 = uint32_t;
 using uint8 = uint8_t;
 struct ObjectGuid {
@@ -26,6 +27,7 @@ struct ObjectGuid {
 };
 struct Player;
 struct Group {
+    struct MemberSlot { ObjectGuid guid; };
     uint32 leader = 0, changes = 0;
     bool bg = false, raid = false;
     std::set<uint32> members, assistants;
@@ -36,6 +38,11 @@ struct Group {
     bool IsAssistant(ObjectGuid guid) const { return assistants.count(guid.value); }
     ObjectGuid GetLeaderGuid() const { return leader; }
     uint32 GetMembersCount() const { return uint32(members.size()); }
+    std::vector<MemberSlot> GetMemberSlots() const {
+        std::vector<MemberSlot> slots;
+        for (uint32 member : members) slots.push_back({member});
+        return slots;
+    }
     uint32 GetId() const { return 7; }
     bool HandleHardcoreInteraction(Player*) const { return true; }
     void RemoveInvite(Player*) {}
@@ -179,9 +186,10 @@ int main() {
         check(!EnsureCompanionInGroup(&owner, nullptr), "Missing bot accepted");
 
         // Group membership changes must not end a contract. Only a deliberate
-        // removal while the owner stays in that group does.
+        // removal while the owner stays in that group does. Hooks run after
+        // the member left, so the fixture group lists the remaining members.
         Group oldGroup;
-        oldGroup.members = {1, 2}; oldGroup.leader = 1;
+        oldGroup.members = {2, 3}; oldGroup.leader = 3;
         bot.group = &oldGroup;
         gContracts.clear(); gOwnedCompanions.clear();
         gContracts[2] = CompanionContract{1};
@@ -189,24 +197,59 @@ int main() {
         dismissed = 0;
         owner.group = nullptr;
         probe.OnRemoveMember(&oldGroup, ObjectGuid(1), 0);
-        check(dismissed == 0 && gContracts.count(2), "Owner leaving a group dismissed a temporary companion");
+        check(dismissed == 0 && gContracts.count(2), "Owner leaving another player dismissed a temporary companion");
+        oldGroup.members = {3};
         probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
         check(dismissed == 0 && gContracts.count(2), "Companion leaving with its master ended its contract");
 
-        owner.group = &oldGroup;
+        oldGroup.members = {1, 3}; owner.group = &oldGroup;
         probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
         check(dismissed == 1, "Kicked companion kept its contract");
 
+        // Leaving a group of only bots leaves the companions behind with it.
+        dismissed = 0;
+        Player otherBot{4, true};
+        sObjectMgr.players[4] = &otherBot;
+        gContracts[5] = CompanionContract{1};
+        Group botGroup;
+        botGroup.members = {2, 4, 5}; botGroup.leader = 2;
+        owner.group = nullptr;
+        probe.OnRemoveMember(&botGroup, ObjectGuid(1), 0);
+        check(dismissed == 2, "Owner leaving a bot-only group kept its companions");
+
         dismissed = 0; gContracts.clear();
         gOwnedCompanions[2] = OwnedCompanion{1};
-        owner.group = nullptr;
+        owner.group = nullptr; oldGroup.members = {2, 3};
+        probe.OnRemoveMember(&oldGroup, ObjectGuid(1), 0);
+        check(gOwnedCompanions[2].invited, "Owner leaving another player cleared a permanent companion invitation");
+        oldGroup.members = {3};
         probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
-        check(gOwnedCompanions[2].invited, "Owner leaving cleared a permanent companion invitation");
-        owner.group = &oldGroup;
+        check(gOwnedCompanions[2].invited, "Permanent companion leaving with its master lost its invitation");
+        oldGroup.members = {1, 3}; owner.group = &oldGroup;
         probe.OnRemoveMember(&oldGroup, ObjectGuid(2), 0);
         check(!gOwnedCompanions[2].invited, "Kicked permanent companion kept its invitation");
 
-        std::cout << "PASS: existing groups, raids, offline leaders, human authority, explicit leadership, master/leader split, leave-with-master\n";
+        gOwnedCompanions[2].invited = true;
+        botGroup.members = {2, 4}; owner.group = nullptr;
+        probe.OnRemoveMember(&botGroup, ObjectGuid(1), 0);
+        check(!gOwnedCompanions[2].invited, "Owner leaving a bot-only group kept a permanent companion");
+
+        // A two-member group disbands: leaving it or kicking the last companion.
+        gOwnedCompanions.clear(); gContracts[2] = CompanionContract{1};
+        dismissed = 0;
+        Group pair;
+        pair.members = {1, 2}; pair.leader = 1;
+        probe.OnDisband(&pair);
+        check(dismissed == 1, "Disbanding the owner's bot-only group kept the companion");
+        dismissed = 0;
+        pair.members = {1, 3};
+        probe.OnDisband(&pair);
+        check(dismissed == 0, "Disbanding a group with another player dismissed companions");
+        pair.bg = true; pair.members = {1, 2};
+        probe.OnDisband(&pair);
+        check(dismissed == 0, "Battleground disband dismissed companions");
+
+        std::cout << "PASS: existing groups, raids, offline leaders, human authority, explicit leadership, master/leader split, leave-with-master, leave bot-only group\n";
     } catch (std::exception const& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
     }
@@ -220,8 +263,12 @@ def run():
     source = PREFIX
     for signature in ("void EnsureOwnerLeadsGroup(", "bool EnsureCompanionInGroup(", "Player* GetFollowTarget("):
         source += extract(cpp, signature).replace(" override", "") + "\n"
-    source += "struct GroupScriptProbe {\n" + extract(
-        cpp, "void OnRemoveMember(Group* group, ObjectGuid guid").replace(" override", "") + "};\n"
+    for signature in ("void ReleaseOwnerCompanions(", "bool IsCompanionGuid(", "bool GroupHasOtherPlayer("):
+        source += extract(cpp, signature) + "\n"
+    source += "struct GroupScriptProbe {\n"
+    for signature in ("void OnRemoveMember(Group* group, ObjectGuid guid", "void OnDisband(Group* group)"):
+        source += extract(cpp, signature).replace(" override", "") + "\n"
+    source += "};\n"
     source += CHECKS
     with tempfile.TemporaryDirectory(prefix="companion-group-test-") as directory:
         work = Path(directory)

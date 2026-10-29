@@ -699,6 +699,46 @@ void RequestDismissOwner(uint32 ownerGuid)
         }
 }
 
+// Leaving a group of only your own companions means leaving them too. Their
+// invitations end so the maintenance pass does not regroup them around you.
+void ReleaseOwnerCompanions(uint32 ownerGuid)
+{
+    if (!ownerGuid)
+        return;
+
+    for (auto& pair : gContracts)
+        if (pair.second.ownerGuid == ownerGuid && !pair.second.suspended)
+            RequestDismiss(pair.first);
+    for (auto& pair : gOwnedCompanions)
+        if (pair.second.ownerGuid == ownerGuid)
+            pair.second.invited = false;
+}
+
+bool IsCompanionGuid(uint32 guid)
+{
+    return gContracts.count(guid) || gOwnedCompanions.count(guid);
+}
+
+// Offline members count as players: only companions and online PlayerBots are
+// known to be bots.
+bool GroupHasOtherPlayer(Group const* group, uint32 playerGuid)
+{
+    if (!group)
+        return false;
+
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        uint32 const memberGuid = slot.guid.GetCounter();
+        if (memberGuid == playerGuid || IsCompanionGuid(memberGuid))
+            continue;
+        Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid);
+        if (member && GetBotAI(member))
+            continue;
+        return true;
+    }
+    return false;
+}
+
 Player* FindCompanionOwner(uint32 ownerGuid)
 {
     // In this core FindConnectedPlayer aliases FindPlayer, which excludes
@@ -3386,16 +3426,23 @@ public:
 
     // Companions are owned by the player, not by the group. A membership
     // change only ends the contract when the owner is still in that group and
-    // deliberately removed the bot. When the owner leaves or the group
-    // disbands, the companion simply detaches and the maintenance pass regroups
-    // it around its master (who creates a fresh group if needed).
+    // deliberately removed the bot. When the owner leaves a group with other
+    // players, the companion detaches and the maintenance pass regroups it
+    // around its master (who creates a fresh group if needed). Leaving a group
+    // of only bots leaves the companions too; otherwise the owner could never
+    // get out of it.
     void OnRemoveMember(Group* group, ObjectGuid guid, uint8 /*method*/) override
     {
         uint32 const removedGuid = guid.GetCounter();
 
         Player* removedPlayer = ObjectAccessor::FindConnectedPlayer(guid);
-        if (removedPlayer && !GetBotAI(removedPlayer))
+        if (!IsCompanionGuid(removedGuid))
+        {
+            if (group && !group->isBGGroup() && (!removedPlayer || !GetBotAI(removedPlayer)) &&
+                !GroupHasOtherPlayer(group, removedGuid))
+                ReleaseOwnerCompanions(removedGuid);
             return;
+        }
 
         auto ownerStayed = [&](uint32 ownerGuid)
         {
@@ -3414,6 +3461,25 @@ public:
         auto owned = gOwnedCompanions.find(removedGuid);
         if (owned != gOwnedCompanions.end() && ownerStayed(owned->second.ownerGuid))
             owned->second.invited = false;
+    }
+
+    // A two-member group disbands instead of removing the member: leaving it,
+    // or kicking the last companion, never reaches OnRemoveMember. Members are
+    // still listed here.
+    void OnDisband(Group* group) override
+    {
+        if (!group || group->isBGGroup())
+            return;
+
+        for (auto const& slot : group->GetMemberSlots())
+        {
+            uint32 const memberGuid = slot.guid.GetCounter();
+            if (IsCompanionGuid(memberGuid))
+                continue;
+            Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid);
+            if ((!member || !GetBotAI(member)) && !GroupHasOtherPlayer(group, memberGuid))
+                ReleaseOwnerCompanions(memberGuid);
+        }
     }
 };
 } // namespace
