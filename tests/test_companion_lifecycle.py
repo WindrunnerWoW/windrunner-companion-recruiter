@@ -25,6 +25,7 @@ using uint8 = uint8_t; using uint32 = uint32_t;
 using uint64 = uint64_t; using int32 = int32_t;
 using BotRoles = int;
 constexpr BotRoles BOT_ROLE_DPS = 4;
+constexpr uint8 CLASS_DRUID = 11;
 constexpr uint8 INVALID_SPEC_TAB = 255;
 constexpr uint8 GENDER_NONE = 2;
 constexpr uint32 HIGHGUID_PLAYER = 0, MAX_GROUP_SIZE = 5, MAX_RAID_SIZE = 40;
@@ -81,6 +82,7 @@ struct Player {
     enum class HardcoreInteractionResult { Allowed };
     ObjectGuid GetObjectGuid() const { return id; }
     uint32 GetGUIDLow() const { return id; }
+    uint8 getClass() const { return CLASS_DRUID; }
     uint32 GetMapId() const { return mapId; }
     uint32 GetInstanceId() const { return instanceId; }
     uint32 GetLevel() const { return level; }
@@ -126,6 +128,7 @@ struct PlayerbotAI {
     Player* GetMaster() const { return master; }
     void SetMaster(Player* owner) { master = owner; }
     void SetForcedRole(uint8 value) { role = value; }
+    uint8 GetForcedRole() const { return role; }
     void DoSpecificAction(char const*) {}
     void ResetStrategies() { ++strategyResets; RememberReset(); follow = false; }
     void ChangeStrategy(char const*, BotState) { follow = true; }

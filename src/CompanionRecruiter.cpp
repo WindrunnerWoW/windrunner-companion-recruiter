@@ -2175,8 +2175,12 @@ bool PrepareOnlineCompanion(CompanionContract& contract, Player* bot, PlayerbotA
 {
     bot->SetXPGain(false);
     ai->SetForcedRole(uint8(contract.role));
+    // A druid can always fill the damage slot (balance or feral). The talent
+    // mapping reports a feral tree as TANK only, so the plain mask test below
+    // used to reject - and cancel - a perfectly good feral DPS companion.
+    bool const druidCanDps = contract.role == BOT_ROLE_DPS && bot->getClass() == CLASS_DRUID;
     if (contract.specTab == INVALID_SPEC_TAB && bot->GetLevel() >= 10 &&
-        !(AiFactory::GetPlayerRoles(bot) & contract.role))
+        !(AiFactory::GetPlayerRoles(bot) & contract.role) && !druidCanDps)
         return false;
 
     if (contract.specTab != INVALID_SPEC_TAB && bot->GetLevel() >= 10)
@@ -2226,6 +2230,16 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
         return true;
 
     bot->SetXPGain(false);
+
+    // The forced role lives only in PlayerbotAI and is therefore lost on every
+    // relog. A relogged companion comes back with role 0 and the strategies the
+    // login path built from talents (or from the stored set) - a healer that was
+    // respecced/assigned to heal can come back as balance/DPS, and a feral tank
+    // can come back without the bear strategy, which also means IsTank() no
+    // longer finds it and `.dc on` reports no leader tank. Setting the role
+    // again is not enough: AiFactory only consults it while building an engine.
+    // Rebuild once, on the call where the role actually changed.
+    uint8 const previousRole = ai->GetForcedRole();
     ai->SetForcedRole(uint8(contract.role));
 
     // Assign the master before the strategy rebuild below. AiFactory decides
@@ -2237,7 +2251,7 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
     // companion stands at a node or craft spot instead of staying with its
     // owner.
     Player* commandMaster = GetCommandMaster(owner);
-    bool const needsFollow = !contract.prepared || ai->GetMaster() != commandMaster;
+    bool needsFollow = !contract.prepared || ai->GetMaster() != commandMaster;
     ai->SetMaster(commandMaster);
 
     if (!contract.prepared)
@@ -2245,6 +2259,12 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
         if (!PrepareOnlineCompanion(contract, bot, ai))
             return false;
         ai->ResetStrategies();
+    }
+    else if (previousRole != uint8(contract.role))
+    {
+        ai->ResetStrategies();
+        // A rebuild drops the follow strategy; re-assert it below.
+        needsFollow = true;
     }
 
     MaintainCompanionFollow(commandMaster, bot, ai, needsFollow);
@@ -2266,8 +2286,12 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
     if (!ai || !owner)
         return false;
 
+    // See InitializeOnlineCompanion: the forced role is not persisted, so a
+    // relogged companion must rebuild its strategies once to pick the role's
+    // spec/rotation back up.
+    uint8 const previousRole = ai->GetForcedRole();
     ai->SetForcedRole(uint8(companion.role));
-    bool const needsFollow = !companion.prepared || ai->GetMaster() != owner;
+    bool needsFollow = !companion.prepared || ai->GetMaster() != owner;
     if (ai->GetMaster() != owner)
         ai->SetMaster(owner);
 
@@ -2294,6 +2318,12 @@ bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* 
         sRandomPlayerbotMgr.SetValue(companion.botGuid, "create group", 0);
         ai->ResetStrategies();
         companion.prepared = true;
+    }
+    else if (previousRole != uint8(companion.role))
+    {
+        ai->ResetStrategies();
+        // A rebuild drops the follow strategy; re-assert it below.
+        needsFollow = true;
     }
 
     if (!companion.invited)
