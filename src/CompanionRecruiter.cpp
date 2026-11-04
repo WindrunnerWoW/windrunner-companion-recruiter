@@ -21,7 +21,13 @@
 #include "RandomPlayerbotFactory.h"
 #include "RandomPlayerbotMgr.h"
 #include "World.h"
+#ifdef PLAYERBOTS_AC
+// vmangos: the ported module has no strategy/ directory and Event.h is on its include path
+#include "BotSessionCompat.h"
+#include "Event.h"
+#else
 #include "strategy/Event.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -347,7 +353,12 @@ void EnsureRecruiterSpecPaths()
         return;
     gRecruiterSpecPathsInitialized = true;
 
+#ifdef PLAYERBOTS_AC
+    // vmangos: sWorld is a facade pointer in the ported module
+    uint32 const maxLevel = std::min<uint32>(sWorld->getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL), 100);
+#else
     uint32 const maxLevel = std::min<uint32>(sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL), 100);
+#endif
     for (RecruiterSpec const& definition : RECRUITER_SPECS)
     {
         if (FindRecruiterTalentPath(definition.cls, definition.tab))
@@ -732,7 +743,12 @@ bool GroupHasOtherPlayer(Group const* group, uint32 playerGuid)
         if (memberGuid == playerGuid || IsCompanionGuid(memberGuid))
             continue;
         Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid);
+#ifdef PLAYERBOTS_AC
+        // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+        if (member && GET_PLAYERBOT_AI(member))
+#else
         if (member && GetBotAI(member))
+#endif
             continue;
         return true;
     }
@@ -880,14 +896,24 @@ PlayerRole RoleForPlayer(Player const* player)
     if (owned != gOwnedCompanions.end())
         return PlayerRoleForBotRole(owned->second.role);
 
+#ifdef PLAYERBOTS_AC
+    // vmangos: GET_PLAYERBOT_AI already takes a const Player*
+    if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
+#else
     if (PlayerbotAI* ai = GetBotAI(const_cast<Player*>(player)))
+#endif
     {
         BotRoles const forcedRole = BotRoles(ai->GetForcedRole());
         if (forcedRole != BOT_ROLE_NONE)
             return PlayerRoleForBotRole(forcedRole);
     }
 
+#ifdef PLAYERBOTS_AC
+    // vmangos: the ported factory only offers GetPlayerRoles(Player*)
+    return PlayerRoleForBotRole(AiFactory::GetPlayerRoles(const_cast<Player*>(player)));
+#else
     return PlayerRoleForBotRole(AiFactory::GetPlayerRoles(player));
+#endif
 }
 
 bool IsRecruiterCompanion(Player const* player)
@@ -914,10 +940,20 @@ std::vector<Player*> GetRecruitingHumanMembers(Player* owner)
     if (Group* group = owner->GetGroup())
     {
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+#ifdef PLAYERBOTS_AC
+            // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+            if (Player* member = ref->getSource(); member && !GET_PLAYERBOT_AI(member) && !IsRecruiterCompanion(member))
+#else
             if (Player* member = ref->getSource(); member && !GetBotAI(member) && !IsRecruiterCompanion(member))
+#endif
                 members.push_back(member);
     }
+#ifdef PLAYERBOTS_AC
+    // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+    else if (!GET_PLAYERBOT_AI(owner))
+#else
     else if (!GetBotAI(owner))
+#endif
         members.push_back(owner);
 
     return members;
@@ -1027,8 +1063,14 @@ RoleCounts GetCurrentRoles(Player* owner, std::map<uint32, PlayerRole> const& as
         if (!member)
             return;
         auto assigned = assignedRoles.find(member->GetGUIDLow());
+#ifdef PLAYERBOTS_AC
+        // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+        CountRole(counts, !GET_PLAYERBOT_AI(member) && !IsRecruiterCompanion(member) && assigned != assignedRoles.end() ?
+            assigned->second : RoleForPlayer(member));
+#else
         CountRole(counts, !GetBotAI(member) && !IsRecruiterCompanion(member) && assigned != assignedRoles.end() ?
             assigned->second : RoleForPlayer(member));
+#endif
     };
 
     Group* group = owner->GetGroup();
@@ -1190,10 +1232,18 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
     }
 
     std::ostringstream parameters;
+#ifdef PLAYERBOTS_AC
+    // vmangos: the ported ChatHelper spells these names with a capital letter
+    parameters << "level=" << uint32(owner->GetLevel())
+               << " class=" << ChatHelper::FormatClass(cls)
+               << " role=" << ChatHelper::FormatRole(role)
+               << " race=" << uint32(race);
+#else
     parameters << "level=" << uint32(owner->GetLevel())
                << " class=" << ChatHelper::formatClass(cls)
                << " role=" << ChatHelper::formatRole(role)
                << " race=" << uint32(race);
+#endif
     if (permanent && (gender == GENDER_MALE || gender == GENDER_FEMALE))
         parameters << " gender=" << uint32(gender);
     if (!permanent)
@@ -1269,6 +1319,18 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
     if (!permanent)
         sRandomPlayerbotMgr.AddPlayerBot(botGuidLow, 0);
 
+#ifdef PLAYERBOTS_AC
+    // vmangos: the ported ChatHelper spells these names with a capital letter
+    std::string const specDescription = specTab == INVALID_SPEC_TAB ? std::string() :
+        RecruiterClassName(cls) + std::string(" ") + RecruiterSpecDisplayName(cls, specTab, role) +
+            ", " + ChatHelper::FormatRole(role);
+    SendMessage(owner, permanent ? "You now own " + permanentName +
+        (specDescription.empty() ? std::string() : " (" + specDescription + ")") +
+        ". It can be invited for free from Companion Management."
+        : "A " + (specTab == INVALID_SPEC_TAB ? ChatHelper::FormatRole(role) :
+            RecruiterSpecDisplayName(cls, specTab, role) + " " + ChatHelper::FormatRole(role)) +
+            " companion is on the way. Contract price: " + FormatMoney(cost) + ".");
+#else
     std::string const specDescription = specTab == INVALID_SPEC_TAB ? std::string() :
         RecruiterClassName(cls) + std::string(" ") + RecruiterSpecDisplayName(cls, specTab, role) +
             ", " + ChatHelper::formatRole(role);
@@ -1278,6 +1340,7 @@ bool CreateCompanion(Player* owner, BotRoles role, uint8 forcedClass = 0, bool p
         : "A " + (specTab == INVALID_SPEC_TAB ? ChatHelper::formatRole(role) :
             RecruiterSpecDisplayName(cls, specTab, role) + " " + ChatHelper::formatRole(role)) +
             " companion is on the way. Contract price: " + FormatMoney(cost) + ".");
+#endif
     return true;
 }
 
@@ -1732,7 +1795,12 @@ void AddPermanentRaceOptions(Player* player, uint8 cls)
         if (IsRaceInOwnerFaction(player, race))
         {
             bool const available = IsRaceAvailableToOwner(player, cls, race);
+#ifdef PLAYERBOTS_AC
+            // vmangos: the ported ChatHelper spells this name with a capital letter
+            std::string const raceName = ChatHelper::FormatRace(race);
+#else
             std::string const raceName = ChatHelper::formatRace(race);
+#endif
             AddMenuItem(player, GOSSIP_ICON_MONEY_BAG,
                 (available ? "Race: " + raceName + " (" + cost + ")" : "Race unavailable: " + raceName),
                 ACTION_PERMANENT_SELECT_RACE_BASE + uint32(race - 1));
@@ -1802,12 +1870,22 @@ void SendManageMenu(Player* player, Creature* creature)
             bool const following = bot && player->IsInGroup(bot, true);
             std::string const status = following ? "Following" :
                 (companion.invited ? "Inviting" : (bot ? "Idle" : "Stored"));
+#ifdef PLAYERBOTS_AC
+            // vmangos: the ported ChatHelper spells these names with a capital letter
+            AddMenuItem(player, following ? GOSSIP_ICON_TALK : GOSSIP_ICON_CHAT,
+                companion.name + " - " + RecruiterClassName(companion.cls) +
+                    " / " + (companion.specTab < 3 ? RecruiterSpecDisplayName(companion.cls, companion.specTab, companion.role) : "Unknown") +
+                    " / " + ChatHelper::FormatRole(companion.role) + " / " + ChatHelper::FormatRace(companion.race) +
+                    " / " + (companion.gender == GENDER_FEMALE ? "Female" : "Male") + " [" + status + "]",
+                ACTION_OWNED_TOGGLE_BASE + index);
+#else
             AddMenuItem(player, following ? GOSSIP_ICON_TALK : GOSSIP_ICON_CHAT,
                 companion.name + " - " + RecruiterClassName(companion.cls) +
                     " / " + (companion.specTab < 3 ? RecruiterSpecDisplayName(companion.cls, companion.specTab, companion.role) : "Unknown") +
                     " / " + ChatHelper::formatRole(companion.role) + " / " + ChatHelper::formatRace(companion.race) +
                     " / " + (companion.gender == GENDER_FEMALE ? "Female" : "Male") + " [" + status + "]",
                 ACTION_OWNED_TOGGLE_BASE + index);
+#endif
             AddMenuItem(player, GOSSIP_ICON_CHAT, "Remove companion: " + companion.name,
                 ACTION_OWNED_REMOVE_BASE + index);
         }
@@ -1858,7 +1936,12 @@ Player* GetFollowTarget(Player* owner, Player* bot)
     if (!group || group->GetLeaderGuid() == owner->GetObjectGuid())
         return owner;
 
+#ifdef PLAYERBOTS_AC
+    // vmangos: sObjectMgr is a facade pointer without GetPlayer, this is the same lookup
+    Player* leader = ObjectAccessor::FindPlayer(group->GetLeaderGuid());
+#else
     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+#endif
     return leader && leader->IsInWorld() ? leader : owner;
 }
 
@@ -2003,7 +2086,12 @@ bool EnsureCompanionInGroup(Player* owner, Player* bot)
             delete group;
             return false;
         }
+#ifdef PLAYERBOTS_AC
+        // vmangos: groups live in the native ObjectMgr behind the facade
+        AcCompat::NativeObjectMgr().AddGroup(group);
+#else
         sObjectMgr.AddGroup(group);
+#endif
     }
 
     return group->AddMember(bot->GetObjectGuid(), bot->GetName());
@@ -2225,7 +2313,12 @@ void MaintainCompanionFollow(Player* owner, Player* bot, PlayerbotAI* ai, bool s
 
 bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Player* bot)
 {
+#ifdef PLAYERBOTS_AC
+    // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+    PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+#else
     PlayerbotAI* ai = GetBotAI(bot);
+#endif
     if (!ai || !owner)
         return true;
 
@@ -2282,7 +2375,12 @@ bool InitializeOnlineCompanion(CompanionContract& contract, Player* owner, Playe
 
 bool InitializeOwnedCompanion(OwnedCompanion& companion, Player* owner, Player* bot)
 {
+#ifdef PLAYERBOTS_AC
+    // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+    PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+#else
     PlayerbotAI* ai = GetBotAI(bot);
+#endif
     if (!ai || !owner)
         return false;
 
@@ -2417,7 +2515,12 @@ void UpdateOwnedCompanions(uint32& preparationBudget)
 
             EnsureOwnedCompanionOnline(companion);
             bot = sRandomPlayerbotMgr.GetPlayerBot(companion.botGuid);
+#ifdef PLAYERBOTS_AC
+            // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+            if (bot && GET_PLAYERBOT_AI(bot))
+#else
             if (bot && GetBotAI(bot))
+#endif
             {
                 if (!companion.prepared)
                 {
@@ -2660,7 +2763,12 @@ void UpdateContracts(uint32& preparationBudget)
         }
 
         contract.loginRequested = false;
+#ifdef PLAYERBOTS_AC
+        // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+#else
         PlayerbotAI* ai = GetBotAI(bot);
+#endif
         if (!ai)
         {
             if (contract.loginStartedAt == Clock::time_point{})
@@ -2805,7 +2913,12 @@ struct BanterCohort
 {
     uint32 ownerGuid = 0;
     Group* group = nullptr;
+#ifdef PLAYERBOTS_AC
+    // vmangos: the ported core has no TEAM_BOTH_ALLOWED, TEAM_NONE is the established stand-in
+    Team team = TEAM_NONE;
+#else
     Team team = TEAM_BOTH_ALLOWED;
+#endif
     std::vector<uint32> bots;
 };
 
@@ -2831,7 +2944,12 @@ void UpdateBanter()
     {
         Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(HIGHGUID_PLAYER, ownerGuid));
         Player* bot = sRandomPlayerbotMgr.GetPlayerBot(botGuid);
+#ifdef PLAYERBOTS_AC
+        // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+        if (!owner || !bot || !GET_PLAYERBOT_AI(bot))
+#else
         if (!owner || !bot || !GetBotAI(bot))
+#endif
             return;
         Group* group = owner->GetGroup();
         if (!group || bot->GetGroup() != group)
@@ -2923,7 +3041,12 @@ void UpdateBanter()
             BanterScript const& script = scriptItr->second;
             BanterLine const& line = script.lines[state.nextLine];
             Player* speaker = sRandomPlayerbotMgr.GetPlayerBot(state.speakers[line.speakerSlot]);
+#ifdef PLAYERBOTS_AC
+            // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+            PlayerbotAI* ai = speaker ? GET_PLAYERBOT_AI(speaker) : nullptr;
+#else
             PlayerbotAI* ai = speaker ? GetBotAI(speaker) : nullptr;
+#endif
             if (!ai || !ai->SayCompanionBanter(line.text))
             {
                 state.activeScriptId = 0;
@@ -3393,7 +3516,12 @@ public:
     {
         if (player)
             gFillRoleSessions.erase(player->GetGUIDLow());
+#ifdef PLAYERBOTS_AC
+        // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+        if (player && !GET_PLAYERBOT_AI(player))
+#else
         if (player && !GetBotAI(player))
+#endif
         {
             SuspendOwnerContracts(player->GetGUIDLow());
             for (auto& pair : gOwnedCompanions)
@@ -3468,7 +3596,12 @@ public:
         Player* removedPlayer = ObjectAccessor::FindConnectedPlayer(guid);
         if (!IsCompanionGuid(removedGuid))
         {
+#ifdef PLAYERBOTS_AC
+            // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+            if (group && !group->isBGGroup() && (!removedPlayer || !GET_PLAYERBOT_AI(removedPlayer)) &&
+#else
             if (group && !group->isBGGroup() && (!removedPlayer || !GetBotAI(removedPlayer)) &&
+#endif
                 !GroupHasOtherPlayer(group, removedGuid))
                 ReleaseOwnerCompanions(removedGuid);
             return;
@@ -3507,7 +3640,12 @@ public:
             if (IsCompanionGuid(memberGuid))
                 continue;
             Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid);
+#ifdef PLAYERBOTS_AC
+            // vmangos: GET_PLAYERBOT_AI replaces LEGACY's GetBotAI
+            if ((!member || !GET_PLAYERBOT_AI(member)) && !GroupHasOtherPlayer(group, memberGuid))
+#else
             if ((!member || !GetBotAI(member)) && !GroupHasOtherPlayer(group, memberGuid))
+#endif
                 ReleaseOwnerCompanions(memberGuid);
         }
     }

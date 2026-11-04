@@ -14,11 +14,16 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "POST_TARGETS")
     set(COMPANION_RECRUITER_TARGET modules)
   endif()
 
-  target_include_directories(${COMPANION_RECRUITER_TARGET}
-    PRIVATE
-      ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots
-      ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot
-      ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot/strategy)
-  target_compile_definitions(${COMPANION_RECRUITER_TARGET} PRIVATE MANGOSBOT_ZERO ENABLE_PLAYERBOTS)
+  if(PLAYERBOTS_IMPL STREQUAL "ac")
+    # The ported module exports its include directories through the playerbots target.
+    target_compile_definitions(${COMPANION_RECRUITER_TARGET} PRIVATE MANGOSBOT_ZERO ENABLE_PLAYERBOTS PLAYERBOTS_AC)
+  else()
+    target_include_directories(${COMPANION_RECRUITER_TARGET}
+      PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots
+        ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot
+        ${CMAKE_SOURCE_DIR}/src/modules/PlayerBots/playerbot/strategy)
+    target_compile_definitions(${COMPANION_RECRUITER_TARGET} PRIVATE MANGOSBOT_ZERO ENABLE_PLAYERBOTS)
+  endif()
   target_link_libraries(${COMPANION_RECRUITER_TARGET} PUBLIC playerbots)
 endif()
