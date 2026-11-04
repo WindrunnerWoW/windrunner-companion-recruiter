@@ -17,6 +17,17 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "POST_TARGETS")
   if(PLAYERBOTS_IMPL STREQUAL "ac")
     # The ported module exports its include directories through the playerbots target.
     target_compile_definitions(${COMPANION_RECRUITER_TARGET} PRIVATE MANGOSBOT_ZERO ENABLE_PLAYERBOTS PLAYERBOTS_AC)
+
+    # playerbots exports only its AC header dirs; its core include dirs and the acpch.h precompiled
+    # header stay PRIVATE. Scope both to the recruiter TU, because the modules target also builds
+    # the other static modules, which must not see the force-included header.
+    set_source_files_properties(
+      ${CMAKE_SOURCE_DIR}/modules/mod-companion-recruiter/src/CompanionRecruiter.cpp
+      PROPERTIES
+        INCLUDE_DIRECTORIES
+          "${CMAKE_SOURCE_DIR}/src/shared/Config;${CMAKE_SOURCE_DIR}/src/shared/Util;${CMAKE_SOURCE_DIR}/src/shared/Log;${CMAKE_SOURCE_DIR}/src/shared/Database;${BOOST_ROOT}"
+        COMPILE_OPTIONS
+          "/FI\"${CMAKE_SOURCE_DIR}/src/modules/PlayerBotsAC/ac-compat/acpch.h\"")
   else()
     target_include_directories(${COMPANION_RECRUITER_TARGET}
       PRIVATE
