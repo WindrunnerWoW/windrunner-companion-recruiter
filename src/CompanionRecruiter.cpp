@@ -168,7 +168,12 @@ struct CompanionContract
     uint8 specTab = INVALID_SPEC_TAB;
     BotRoles role = BOT_ROLE_DPS;
     Clock::time_point createdAt;
+    // Start of the current login episode: set with the first request only, so a
+    // repeated request cannot push the timeout out of reach.
     Clock::time_point loginStartedAt{};
+    Clock::time_point loginPausedAt{};
+    Clock::time_point loginRetryAt{};
+    uint32 loginAttempts = 0; // login requests issued in the current episode
     Clock::time_point preparedAt{};
     Clock::time_point expiresAt;
     Clock::time_point graceExpiresAt{};
@@ -456,6 +461,19 @@ uint32 LoginTimeoutSeconds()
     return uint32(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.LoginTimeoutSeconds", 120), 30, 600));
 }
 
+// A login that keeps failing must not be requested once per maintenance tick.
+// After three failed requests the character cannot be loaded at all (name
+// filter or corrupt data), so the contract ends like a login timeout.
+constexpr uint32 LOGIN_MAX_ATTEMPTS = 3;
+
+uint32 LoginRetryDelaySeconds(uint32 failedAttempts)
+{
+    // 5 s, then 15 s, then 30 s before the next request.
+    static uint32 const delays[LOGIN_MAX_ATTEMPTS] = {5, 15, 30};
+    uint32 const index = std::min<uint32>(std::max<uint32>(failedAttempts, 1), LOGIN_MAX_ATTEMPTS) - 1;
+    return delays[index];
+}
+
 float TeleportDistance()
 {
     return float(std::clamp<int32>(sConfig.GetIntDefault("CompanionRecruiter.TeleportDistance", 100), 30, 500));
@@ -671,7 +689,9 @@ void TrackCompanion(uint32 botGuid, uint32 ownerGuid, BotRoles role, uint8 cls, 
     contract.specTab = specTab;
     contract.role = role;
     contract.createdAt = Clock::now();
+    // The hire request below is the first login request of this episode.
     contract.loginStartedAt = contract.createdAt;
+    contract.loginAttempts = 1;
     contract.expiresAt = contract.createdAt + std::chrono::seconds(LifetimeSeconds());
     contract.expiresAtUnix = UnixNow() + LifetimeSeconds();
     contract.loginRequested = true;
@@ -2600,6 +2620,12 @@ void SuspendTemporaryCompanion(CompanionContract& contract)
     contract.suspended = true;
     contract.initialized = false;
     contract.loginRequested = false;
+    // A deliberate suspend ends the login episode; the next request starts over
+    // with a fresh timeout and an empty retry budget.
+    contract.loginStartedAt = {};
+    contract.loginPausedAt = {};
+    contract.loginRetryAt = {};
+    contract.loginAttempts = 0;
     sRandomPlayerbotMgr.CancelPendingBotLogin(contract.botGuid);
     if (Player* bot = sRandomPlayerbotMgr.GetPlayerBot(contract.botGuid))
     {
@@ -2614,6 +2640,29 @@ void SuspendOwnerContracts(uint32 ownerGuid)
     for (auto& pair : gContracts)
         if (pair.second.ownerGuid == ownerGuid)
             SuspendTemporaryCompanion(pair.second);
+}
+
+// A loading screen or a bot that is still transferring must not consume the
+// login timeout. Move the start forward by the paused time instead of restarting
+// it: restarting would keep the timeout from ever expiring.
+void PauseLoginTimeout(CompanionContract& contract, Clock::time_point now)
+{
+    if (contract.loginStartedAt == Clock::time_point{})
+        return;
+
+    if (contract.loginPausedAt != Clock::time_point{} && now > contract.loginPausedAt)
+        contract.loginStartedAt += now - contract.loginPausedAt;
+    contract.loginPausedAt = now;
+}
+
+void ResumeLoginTimeout(CompanionContract& contract, Clock::time_point now)
+{
+    if (contract.loginPausedAt == Clock::time_point{})
+        return;
+
+    if (now > contract.loginPausedAt)
+        contract.loginStartedAt += now - contract.loginPausedAt;
+    contract.loginPausedAt = Clock::time_point{};
 }
 
 bool UpdateContractGrace(CompanionContract& contract, uint64 nowUnix, bool protectedOwner)
@@ -2661,7 +2710,7 @@ void UpdateContracts(uint32& preparationBudget)
         {
             // Absolute contract expiry remains unchanged. Only pending login
             // and preparation deadlines wait for the transfer to complete.
-            contract.loginStartedAt = now;
+            PauseLoginTimeout(contract, now);
             if (contract.prepared && !contract.joinedOnce)
                 contract.preparedAt = now;
             continue;
@@ -2718,11 +2767,13 @@ void UpdateContracts(uint32& preparationBudget)
 
         if (bot && (!bot->IsInWorld() || bot->IsBeingTeleported()))
         {
-            contract.loginStartedAt = now;
+            PauseLoginTimeout(contract, now);
             if (contract.prepared && !contract.joinedOnce)
                 contract.preparedAt = now;
             continue;
         }
+
+        ResumeLoginTimeout(contract, now);
 
         bool const wasSuspended = contract.suspended;
         contract.suspended = false;
@@ -2730,15 +2781,42 @@ void UpdateContracts(uint32& preparationBudget)
             contract.preparedAt = now;
         if (!bot)
         {
-            if (!sRandomPlayerbotMgr.HasPendingBotLogin(contract.botGuid))
+            bool const pending = sRandomPlayerbotMgr.HasPendingBotLogin(contract.botGuid);
+            if (!pending && contract.loginRequested)
             {
-                sRandomPlayerbotMgr.AddPlayerBot(contract.botGuid, 0);
-                contract.loginStartedAt = now;
-                contract.loginRequested = true;
+                // The last request ended without a loaded character: the name filter or corrupt
+                // data aborted Player::LoadFromDB, or AddPlayerBot refused the login. Back off
+                // instead of asking again on every tick.
+                contract.loginRequested = false;
+                contract.loginRetryAt = now + std::chrono::seconds(LoginRetryDelaySeconds(contract.loginAttempts));
             }
-            else if (!contract.loginRequested)
+
+            if (!pending && now >= contract.loginRetryAt)
             {
-                contract.loginStartedAt = now;
+                if (contract.loginAttempts >= LOGIN_MAX_ATTEMPTS)
+                {
+                    if (!contract.joinedOnce)
+                    {
+                        if (contract.paidCost)
+                            owner->LogModifyMoney(int32(contract.paidCost), "CompanionRecruiterRefund");
+                        messages.emplace_back(owner,
+                            "A companion could not join your group; its contract price was refunded.");
+                        deletes.push_back(contract.botGuid);
+                    }
+                    else
+                    {
+                        // A companion that already joined keeps its contract; it is not asked for
+                        // another login until the next invitation re-arms it.
+                        sRandomPlayerbotMgr.CancelPendingBotLogin(contract.botGuid);
+                        contract.loginRequested = false;
+                    }
+                    continue;
+                }
+
+                if (contract.loginStartedAt == Clock::time_point{})
+                    contract.loginStartedAt = now;
+                sRandomPlayerbotMgr.AddPlayerBot(contract.botGuid, 0);
+                ++contract.loginAttempts;
                 contract.loginRequested = true;
             }
 
@@ -2788,11 +2866,22 @@ void UpdateContracts(uint32& preparationBudget)
                     contract.suspended = true;
                     sRandomPlayerbotMgr.LogoutPlayerBot(contract.botGuid, true);
                     contract.suspended = false;
+                    // A deliberate restart ends the login episode.
                     contract.loginStartedAt = {};
+                    contract.loginPausedAt = {};
+                    contract.loginRetryAt = {};
+                    contract.loginAttempts = 0;
                 }
             }
             continue;
         }
+
+        // The character is loaded: the login episode is over, so a later relog
+        // starts over with a fresh timeout and an empty retry budget.
+        contract.loginStartedAt = {};
+        contract.loginPausedAt = {};
+        contract.loginRetryAt = {};
+        contract.loginAttempts = 0;
 
         bool const mayInitialize = contract.prepared || preparationBudget != 0;
         if (!mayInitialize)

@@ -38,6 +38,7 @@ struct Clock {
 Clock::time_point Clock::current{std::chrono::seconds(1000)};
 uint64 UnixNow() { return uint64(std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count()); }
 uint32 LoginTimeoutSeconds() { return 120; }
+constexpr uint32 LOGIN_MAX_ATTEMPTS = 3;
 uint32 GraceSeconds() { return 600; }
 uint32 EnchantItemLevelThreshold() { return 65; }
 Clock::time_point RestoreDeadline(uint64 value) { return Clock::time_point(std::chrono::seconds(value)); }
@@ -333,6 +334,39 @@ int main(int argc, char** argv) {
         owner.session.logout = false; ObjectAccessor::players.erase(1);
         check(!sPlayerbotAIConfig.companionRecruiterAllowsLogin(2) &&
               !sPlayerbotAIConfig.companionRecruiterAllowsLogin(3), "Absent owner allowed bot login");
+
+        if (scenario == "all" || scenario == "login") {
+            // A character that never loads (name filter or corrupt data) drops out of
+            // the pending logins without ever appearing. The recruiter must back off
+            // and finally refund the contract instead of requesting a login every tick.
+            gContracts.clear(); gOwnedCompanions.clear(); gCompanionLocations.clear();
+            sRandomPlayerbotMgr.bots.clear(); sRandomPlayerbotMgr.pending.clear();
+            sRandomPlayerbotMgr.logins = sRandomPlayerbotMgr.cancels = 0;
+            messages = deletes = 0;
+            uint32 const refundsBefore = owner.refunds;
+            owner.world = true; owner.teleport = false; owner.mapId = 0;
+            ObjectAccessor::players = {{1, &owner}};
+
+            CompanionContract failing;
+            failing.botGuid = 2; failing.ownerGuid = 1; failing.paidCost = 100;
+            failing.expiresAtUnix = 10000; failing.expiresAt = RestoreDeadline(10000);
+            // What TrackCompanion plus the hire path leave behind: the first request is out.
+            sRandomPlayerbotMgr.AddPlayerBot(2, 0);
+            failing.loginStartedAt = Clock::now();
+            failing.loginAttempts = 1; failing.loginRequested = true;
+            gContracts[2] = failing;
+
+            uint32 loginBudget = 4;
+            for (uint32 tick = 0; tick < 200 && gContracts.count(2); ++tick) {
+                Clock::current += std::chrono::seconds(1);
+                sRandomPlayerbotMgr.pending.clear(); // the login callback drops the failed request
+                UpdateContracts(loginBudget);
+            }
+            check(!gContracts.count(2), "Failed login kept the contract alive");
+            check(sRandomPlayerbotMgr.logins == 3, "Failed login was not requested exactly three times");
+            check(owner.refunds == refundsBefore + 1 && messages == 1 && deletes == 1,
+                  "Failed login was not refunded and reported once");
+        }
         std::cout << "PASS: " << scenario << ", owner logout and login policy\n";
     } catch (std::exception const& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
@@ -354,8 +388,10 @@ def run(source_path, scenario):
                       "bool PrepareOnlineCompanion(", "bool InitializeOnlineCompanion(",
                       "bool InitializeOwnedCompanion(", "void EnsureOwnedCompanionOnline(",
                       "void DismissOwnedCompanion(", "void UpdateOwnedCompanions(",
-                      "void SuspendTemporaryCompanion(", "bool UpdateContractGrace(",
-                      "void UpdateContracts(", "void Addmod_companion_recruiterScripts("):
+                      "void PauseLoginTimeout(", "void ResumeLoginTimeout(",
+                      "uint32 LoginRetryDelaySeconds(", "void SuspendTemporaryCompanion(",
+                      "bool UpdateContractGrace(", "void UpdateContracts(",
+                      "void Addmod_companion_recruiterScripts("):
         source += extract(cpp, signature)
     # The compiled main supports individual historical regression cases.
     source += CHECKS.replace('argc > 1 ? argv[1] : "all"', f'"{scenario}"')
@@ -365,6 +401,6 @@ def run(source_path, scenario):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[1] / "src/CompanionRecruiter.cpp")
-    parser.add_argument("--case", choices=("all", "zoning", "preparation", "movement"), default="all")
+    parser.add_argument("--case", choices=("all", "zoning", "preparation", "movement", "login"), default="all")
     args = parser.parse_args()
     run(args.source, args.case)
