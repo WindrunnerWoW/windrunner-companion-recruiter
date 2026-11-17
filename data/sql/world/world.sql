@@ -8790,3 +8790,21 @@ WHERE `entry` = 919009
   AND `script_name` = 'npc_companion_recruiter';
 -- END SOURCE: data/sql/world/0006_companion_recruiter_tauren_scale.sql
 
+-- BEGIN SOURCE: data/sql/world/0007_companion_recruiter_darnassus_spawn.sql
+-- The Darnassus spawn (guid 2902703, beside Innkeeper Saelienne) was created as
+-- the Undead variant 919010, which put a Horde recruiter inside the night elf
+-- capital. It belongs to the Night Elf variant 919005.
+UPDATE `creature`
+SET `id` = 919005
+WHERE `guid` = 2902703;
+
+-- 0005 uses INSERT IGNORE, so a world where the wrong spawn was already deleted
+-- would stay empty. Recreate it at the approved Darnassus position.
+INSERT IGNORE INTO `creature`
+    (`guid`, `id`, `id2`, `id3`, `id4`, `map`, `position_x`, `position_y`, `position_z`,
+     `orientation`, `spawntimesecsmin`, `spawntimesecsmax`, `wander_distance`,
+     `health_percent`, `mana_percent`, `movement_type`, `spawn_flags`, `visibility_mod`)
+VALUES
+    (2902703, 919005, 0, 0, 0, 1, 10143.5, 2220.66, 1329.98, 3.48748, 120, 120, 0.0, 100.0, 100.0, 0, 0, 0.0);
+-- END SOURCE: data/sql/world/0007_companion_recruiter_darnassus_spawn.sql
+
